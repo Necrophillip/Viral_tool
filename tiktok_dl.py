@@ -61,6 +61,18 @@ except ImportError:
 import shutil
 FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 
+# ─── Dependencias opcionales de Dubbing ───────────────────────────────────────
+def _check_dub_deps() -> tuple[bool, list[str]]:
+    missing = []
+    for pkg, mod in [("mlx-whisper","mlx_whisper"),
+                     ("edge-tts","edge_tts"),
+                     ("deep-translator","deep_translator")]:
+        try: __import__(mod)
+        except ImportError: missing.append(pkg)
+    return len(missing) == 0, missing
+
+DUB_AVAILABLE, DUB_MISSING = _check_dub_deps()
+
 # ─── ANSI ────────────────────────────────────────────────────────────────────
 ESC   = "\033["
 CLEAR = ESC + "2J" + ESC + "H"
@@ -386,7 +398,7 @@ def sanitize(item: DownloadItem, raw_path: Path) -> Path:
 
 
 # ─── Descarga individual ──────────────────────────────────────────────────────
-def download(item: DownloadItem, out_dir: Path) -> None:
+def download(item: DownloadItem, out_dir: Path, do_dub: bool = False, do_sub: bool = False, dub_voice: str = "es-MX-JorgeNeural") -> None:
     item.status  = Status.RUNNING
     item.started = time.time()
 
@@ -450,8 +462,27 @@ def download(item: DownloadItem, out_dir: Path) -> None:
         if raw_path and raw_path.exists():
             item.progress = ""
             clean = sanitize(item, raw_path)
-            item.status   = Status.OK
-            item.filename = clean.name
+
+            if (do_dub or do_sub) and clean.exists():
+                from dub_es import dub_and_subtitle
+                item.status = Status.SANITIZING
+                item.sanitize_step = "🎙 procesando dubbing/subtítulos..."
+                try:
+                    post = dub_and_subtitle(
+                        clean, out_dir,
+                        do_dub=do_dub, do_sub=do_sub,
+                        voice=dub_voice,
+                        is_916=True, # TikTok is always 9:16
+                        status_cb=lambda s: setattr(item, "sanitize_step", s),
+                    )
+                    item.filename = post.name
+                    item.status = Status.OK
+                except Exception as e:
+                    item.status = Status.ERROR
+                    item.err_msg = f"dubbing: {str(e)[:50]}"
+            else:
+                item.status   = Status.OK
+                item.filename = clean.name
         else:
             item.status   = Status.OK
             item.filename = Path(last_filename).name if last_filename else "?"
@@ -534,7 +565,7 @@ def sanitize_youtube_916(item: DownloadItem, raw_path: Path) -> Path:
 
 
 # ─── YouTube: Descarga individual ────────────────────────────────────────────
-def download_youtube(item: DownloadItem, out_dir: Path, fmt: str) -> None:
+def download_youtube(item: DownloadItem, out_dir: Path, fmt: str, do_dub: bool = False, do_sub: bool = False, dub_voice: str = "es-MX-JorgeNeural") -> None:
     """
     Descarga un video de YouTube y aplica sanitización anti-tracking.
 
@@ -599,8 +630,27 @@ def download_youtube(item: DownloadItem, out_dir: Path, fmt: str) -> None:
                 clean = sanitize_youtube_916(item, raw_path)
             else:
                 clean = sanitize(item, raw_path)
-            item.status   = Status.OK
-            item.filename = clean.name
+
+            if (do_dub or do_sub) and clean.exists():
+                from dub_es import dub_and_subtitle
+                item.status = Status.SANITIZING
+                item.sanitize_step = "🎙 procesando dubbing/subtítulos..."
+                try:
+                    post = dub_and_subtitle(
+                        clean, out_dir,
+                        do_dub=do_dub, do_sub=do_sub,
+                        voice=dub_voice,
+                        is_916=(fmt == "916"),
+                        status_cb=lambda s: setattr(item, "sanitize_step", s),
+                    )
+                    item.filename = post.name
+                    item.status = Status.OK
+                except Exception as e:
+                    item.status = Status.ERROR
+                    item.err_msg = f"dubbing: {str(e)[:50]}"
+            else:
+                item.status   = Status.OK
+                item.filename = clean.name
         else:
             item.status   = Status.OK
             item.filename = Path(last_filename).name if last_filename else "?"
@@ -621,7 +671,7 @@ def download_youtube(item: DownloadItem, out_dir: Path, fmt: str) -> None:
 
 
 # ─── Monitor de clipboard ─────────────────────────────────────────────────────
-def monitor_clipboard(out_dir: Path, workers: int) -> None:
+def monitor_clipboard(out_dir: Path, workers: int, do_dub: bool = False, do_sub: bool = False, dub_voice: str = "es-MX-JorgeNeural") -> None:
     executor   = ThreadPoolExecutor(max_workers=workers)
     prev_count = get_change_count()
     prev_text  = get_clipboard()
@@ -643,7 +693,7 @@ def monitor_clipboard(out_dir: Path, workers: int) -> None:
                         item = DownloadItem(url=url)
                         items.append(item)
                         items_map[url] = item
-                    executor.submit(download, item, out_dir)
+                    executor.submit(download, item, out_dir, do_dub, do_sub, dub_voice)
         time.sleep(0.2)
 
     executor.shutdown(wait=True, cancel_futures=False)
@@ -756,6 +806,32 @@ def main() -> None:
         else:
             sys.exit(0)
 
+    # ─── Opciones de post-procesado ───────────────────────────────────────────────
+    do_dub  = False
+    do_sub  = False
+    dub_voice = "es-MX-JorgeNeural"
+
+    if DUB_AVAILABLE:
+        print(f"\n  {BOLD}Post-procesado adicional:{RST}")
+        print(f"  {G}1){RST} Dubbing EN→ES  (reemplaza audio con voz neural en español)")
+        print(f"  {G}2){RST} Subtítulos virales (quema texto estilo TikTok viral)")
+        print(f"  {G}3){RST} Dubbing + Subtítulos")
+        print(f"  {G}4){RST} No — saltar\n")
+        pp = input("  Seleccione: ").strip()
+        do_dub = pp in ("1","3")
+        do_sub = pp in ("2","3")
+
+        if do_dub:
+            print(f"\n  {BOLD}Voz en español:{RST}")
+            print(f"  {G}1){RST} Jorge (México, Masculino)  ← Recomendado")
+            print(f"  {G}2){RST} Dalia (México, Femenina)")
+            print(f"  {G}3){RST} Álvaro (España, Masculino)\n")
+            v = input("  Seleccione voz: ").strip()
+            dub_voice = {"2":"es-MX-DaliaNeural","3":"es-ES-AlvaroNeural"}.get(v, "es-MX-JorgeNeural")
+    else:
+        if DUB_MISSING:
+            print(f"\n  {DIM}💡 Para dubbing: pip install {' '.join(DUB_MISSING)}{RST}")
+
     # Ocultar cursor
     sys.stdout.write(HIDE)
     sys.stdout.flush()
@@ -774,9 +850,9 @@ def main() -> None:
         executor = ThreadPoolExecutor(max_workers=args.workers)
         for item in items:
             if youtube_mode:
-                executor.submit(download_youtube, item, out_dir, yt_fmt)
+                executor.submit(download_youtube, item, out_dir, yt_fmt, do_dub, do_sub, dub_voice)
             else:
-                executor.submit(download, item, out_dir)
+                executor.submit(download, item, out_dir, do_dub, do_sub, dub_voice)
 
         # Dashboard mientras descargan
         t_dash = threading.Thread(target=dashboard_loop, args=(out_dir,), daemon=True)
@@ -808,7 +884,7 @@ def main() -> None:
 
         # Monitor de clipboard en hilo separado
         t_clip = threading.Thread(
-            target=monitor_clipboard, args=(out_dir, args.workers), daemon=False
+            target=monitor_clipboard, args=(out_dir, args.workers, do_dub, do_sub, dub_voice), daemon=False
         )
         t_clip.start()
         t_clip.join()
