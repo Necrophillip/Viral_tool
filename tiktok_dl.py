@@ -67,8 +67,17 @@ def _check_dub_deps() -> tuple[bool, list[str]]:
     for pkg, mod in [("mlx-whisper","mlx_whisper"),
                      ("edge-tts","edge_tts"),
                      ("deep-translator","deep_translator")]:
-        try: __import__(mod)
-        except ImportError: missing.append(pkg)
+        try:
+            # For mlx-whisper on non-Apple machines, the import itself might fail with a dynamic library error,
+            # but if we can find it installed, we'll mark it as present so the CLI menus still appear.
+            if mod == "mlx_whisper":
+                import importlib.util
+                if importlib.util.find_spec(mod) is None:
+                    missing.append(pkg)
+            else:
+                __import__(mod)
+        except ImportError:
+            missing.append(pkg)
     return len(missing) == 0, missing
 
 DUB_AVAILABLE, DUB_MISSING = _check_dub_deps()
